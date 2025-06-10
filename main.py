@@ -12,9 +12,19 @@ load_dotenv()
 IMAGE_DIR = os.getenv('SAVE_DIRECTORY', 'images')
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
+
+# Доступные цвета текста
+COLORS = {
+    'red': '#FF0000',
+    'blue': '#0000FF',
+    'green': '#00FF00',
+    'yellow': '#FFFF00',
+    'white': '#FFFFFF',
+    'black': '#000000'
+}
+
+
 # Очистка старых файлов при старте
-
-
 def cleanup_old_files():
     now = datetime.now()
     for filename in os.listdir(IMAGE_DIR):
@@ -41,7 +51,8 @@ def delete_temp_files(*filenames):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Отправь мне изображение.")
+    await update.message.reply_text("Привет! Отправь мне изображение после отправь текст и выбери для него цвет\n"
+                                    "я добавлю текст на изображение.\nТы сможешь переслать его \nили отправить в группу")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,8 +91,33 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     user_text = update.message.text
+    context.user_data['text_to_add'] = user_text
+
+    # Создаем кнопки для выбора цвета текста
+    color_buttons = [
+        [InlineKeyboardButton(color.capitalize(), callback_data=f"text_color_{color}")
+         for color in list(COLORS.keys())[i:i+2]]
+        for i in range(0, len(COLORS), 2)
+    ]
+
+    await update.message.reply_text(
+        "Выберите цвет текста:",
+        reply_markup=InlineKeyboardMarkup(color_buttons)
+    )
+
+
+async def handle_text_color_choice(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+
+    # Получаем выбранный цвет
+    chosen_color = query.data.split('_')[-1]
+    text_color = COLORS[chosen_color]
+
+    # Получаем сохраненные данные
     original_filename = context.user_data['image_paths']['original']
     edited_filename = context.user_data['image_paths']['edited']
+    user_text = context.user_data['text_to_add']
 
     try:
         with Image.open(original_filename) as image:
@@ -96,7 +132,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
 
             # Уменьшаем размер шрифта, пока текст не поместится
-            while text_width > image.width - 20 or text_height > image.height - 20:  # 20 - отступы
+            while text_width > image.width - 20 or text_height > image.height - 20:
                 font_size -= 1
                 font = ImageFont.truetype(
                     "fonts/Lobster-Regular.ttf", font_size)
@@ -107,24 +143,35 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             x = (image.width - text_width) / 2
             y = (image.height - text_height) / 2
 
-            draw.text((x, y), user_text, fill="red", font=font,
-                      stroke_width=2, stroke_fill="black")
+            # Рисуем текст с выбранным цветом (фон останется черным по умолчанию)
+            draw.text(
+                (x, y),
+                user_text,
+                fill=text_color,
+                font=font,
+                stroke_width=2,
+                stroke_fill="black"  # Фиксированный черный цвет для обводки
+            )
+
             image.save(edited_filename)
 
-            await update.message.reply_photo(photo=open(edited_filename, 'rb'))
+            await query.edit_message_text("Ваше изображение готово:")
+            await context.bot.send_photo(chat_id=query.message.chat.id, photo=open(edited_filename, 'rb'))
 
+            # Кнопки для отправки в группу
             keyboard = [
                 [InlineKeyboardButton(
-                    "Отправить в канал", callback_data='send_to_channel')],
+                    "Отправить в группу", callback_data='send_to_group')],
                 [InlineKeyboardButton("Не отправлять", callback_data='cancel')]
             ]
-            await update.message.reply_text(
-                "Хотите отправить это изображение в канал?",
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text="Хотите отправить это изображение в группу?",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
     except Exception as e:
-        await update.message.reply_text(f"Ошибка: {e}")
+        await query.edit_message_text(f"Ошибка: {e}")
         delete_temp_files(original_filename, edited_filename)
         context.user_data.pop('image_paths', None)
 
@@ -140,17 +187,20 @@ async def button_callback(update: Update, context: CallbackContext):
     original_filename = context.user_data['image_paths']['original']
     edited_filename = context.user_data['image_paths']['edited']
 
-    if query.data == 'send_to_channel':
+    if query.data == 'send_to_group':
+
         try:
-            channel_id = os.getenv("CHANNEL_ID")
+            group_id = os.getenv("GROUP_ID")
+
             with open(edited_filename, 'rb') as photo:
-                await context.bot.send_photo(chat_id=channel_id, photo=photo)
-            await query.edit_message_text("Изображение отправлено в канал!")
+                await context.bot.send_photo(chat_id=group_id, photo=photo)
+            await query.edit_message_text("Изображение отправлено в группу!")
         except Exception as e:
             await query.edit_message_text(f"Ошибка отправки: {e}")
-    else:
+    elif query.data == 'cancel':
         await query.edit_message_text("Отправка отменена.")
-
+    else:
+        await query.edit_message_text("что-то пошло не так")
     # Всегда удаляем временные файлы после обработки
     delete_temp_files(original_filename, edited_filename)
     context.user_data.pop('image_paths', None)
@@ -171,6 +221,8 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(CallbackQueryHandler(
+        handle_text_color_choice, pattern="^text_color_"))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
 
